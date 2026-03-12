@@ -577,7 +577,9 @@ function randomAI(game,state){
 // MAIN APP
 // ============================================================
 const GAME_LIST=Object.keys(GAME_DEFS);
-const MODELS=[{id:"claude-sonnet-4-20250514",name:"Claude Sonnet 4"},{id:"random",name:"Random AI (Demo)"}];
+const DEFAULT_MODELS=[{id:"random",name:"Random AI (Demo)"}];
+
+// Fetch models dynamically at app start
 
 export default function App(){
   const[screen,setScreen]=useState("menu");
@@ -590,8 +592,31 @@ export default function App(){
   const[thinking,setThinking]=useState(false);
   const[result,setResult]=useState(null);
   const[totTok,setTotTok]=useState({i:0,o:0});
+  const[models,setModels]=useState(DEFAULT_MODELS);
+  const[modelsError,setModelsError]=useState("");
   const logRef=useRef(null);
   const busy=useRef(false);
+
+  // Fetch available models from backend on mount
+  useEffect(()=>{
+    fetch("/api/models")
+      .then(r=>{
+        if(!r.ok) throw new Error(`HTTP ${r.status}`);
+        return r.json();
+      })
+      .then(m=>{
+        if(Array.isArray(m)&&m.length){
+          setModels(m);
+          setModelsError("");
+        }else{
+          setModelsError("No models returned from API");
+        }
+      })
+      .catch(e=>{
+        console.error("Failed to fetch models:",e);
+        setModelsError("Cannot reach backend API: "+e.message);
+      });
+  },[]);
 
   useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;},[log]);
   const game=selGame?GAME_DEFS[selGame]:null;
@@ -697,11 +722,25 @@ export default function App(){
 
   if(screen==="setup"){
     if(!Object.keys(players).length){const p={};game.roles.forEach(r=>p[r]="human");setPlayers(p);}
+    // Find first real LLM model (not "random")
+    const firstLLM=models.find(m=>m.id!=="random");
+    const llmModels=models.filter(m=>m.id!=="random");
     return <div style={{minHeight:"100vh",background:"linear-gradient(135deg,#0c0c1d,#1a1a3e,#0d0d2b)",color:"#e8e6f0",fontFamily:"'Georgia',serif"}}>
       <div style={{maxWidth:480,margin:"0 auto",padding:"36px 20px"}}>
         <button onClick={()=>setScreen("menu")} style={{background:"none",border:"none",color:"#7c6fae",cursor:"pointer",fontSize:12,marginBottom:18}}>← Back</button>
         <h2 style={{fontSize:24,fontWeight:300,color:"#c4b5fd",marginBottom:4}}>{game.name}</h2>
         <p style={{color:"#9ca3af",fontSize:12,marginBottom:24}}>{game.desc}</p>
+
+        {/* Error/warning about models */}
+        {modelsError&&<div style={{background:"rgba(231,76,60,.15)",border:"1px solid #e74c3c",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:11,color:"#e74c3c"}}>
+          ⚠️ {modelsError}. Check that your API keys are configured in Render → Environment.
+          <br/><a href="/api/debug/keys" target="_blank" style={{color:"#f39c12",textDecoration:"underline"}}>Click here to check configured keys</a>
+        </div>}
+
+        {llmModels.length===0&&!modelsError&&<div style={{background:"rgba(241,196,15,.15)",border:"1px solid #f1c40f",borderRadius:8,padding:"10px 14px",marginBottom:16,fontSize:11,color:"#f1c40f"}}>
+          ℹ️ No LLM API keys detected. Only "Random AI" is available. Add an API key (OPENAI_API_KEY, OPENROUTER_API_KEY, etc.) in your environment variables.
+        </div>}
+
         <div style={{background:"rgba(30,30,60,.6)",borderRadius:12,padding:20,border:"1px solid #3a3a5c"}}>
           <h3 style={{fontSize:11,letterSpacing:2,textTransform:"uppercase",color:"#7c6fae",marginTop:0,marginBottom:14}}>Players</h3>
           {game.roles.map(role=><div key={role} style={{marginBottom:12}}>
@@ -709,14 +748,33 @@ export default function App(){
             <select value={players[role]||"human"} onChange={e=>setPlayers(p=>({...p,[role]:e.target.value}))}
               style={{width:"100%",padding:"8px",borderRadius:6,border:"1px solid #3a3a5c",background:"#1a1a3e",color:"#e2e0f0",fontSize:12}}>
               <option value="human">🧑 Human</option>
-              {MODELS.map(m=><option key={m.id} value={m.id}>🤖 {m.name}</option>)}
+              {models.map(m=><option key={m.id} value={m.id}>🤖 {m.name}{m.provider&&m.provider!=="local"?` (${m.provider})`:""}</option>)}
             </select>
           </div>)}
           <button onClick={startGame} style={{width:"100%",padding:10,borderRadius:7,border:"none",background:"linear-gradient(135deg,#7c6fae,#5b4f8c)",color:"#fff",fontSize:13,fontWeight:600,cursor:"pointer",marginTop:6}}>Start Game</button>
-          {game.playerCount===2&&<div style={{display:"flex",gap:7,marginTop:8}}>
-            <button onClick={()=>{const p={};game.roles.forEach(r=>p[r]="random");setPlayers(p);}} style={{flex:1,padding:6,borderRadius:5,border:"1px solid #3a3a5c",background:"transparent",color:"#9ca3af",fontSize:10,cursor:"pointer"}}>AI vs AI</button>
-            <button onClick={()=>{const p={};p[game.roles[0]]="human";p[game.roles[1]]="random";setPlayers(p);}} style={{flex:1,padding:6,borderRadius:5,border:"1px solid #3a3a5c",background:"transparent",color:"#9ca3af",fontSize:10,cursor:"pointer"}}>Human vs AI</button>
+
+          {/* Quick preset buttons */}
+          {game.playerCount===2&&<div style={{display:"flex",gap:7,marginTop:10}}>
+            <button onClick={()=>{
+              const ai=firstLLM?firstLLM.id:"random";
+              const p={};game.roles.forEach(r=>p[r]=ai);setPlayers(p);
+            }} style={{flex:1,padding:7,borderRadius:5,border:"1px solid #3a3a5c",background:"transparent",color:"#9ca3af",fontSize:10,cursor:"pointer"}}>
+              🤖 vs 🤖 {firstLLM?firstLLM.name:"Random"}
+            </button>
+            <button onClick={()=>{
+              const ai=firstLLM?firstLLM.id:"random";
+              const p={};p[game.roles[0]]="human";p[game.roles[1]]=ai;setPlayers(p);
+            }} style={{flex:1,padding:7,borderRadius:5,border:"1px solid #3a3a5c",background:"transparent",color:"#9ca3af",fontSize:10,cursor:"pointer"}}>
+              🧑 vs 🤖 {firstLLM?firstLLM.name:"Random"}
+            </button>
           </div>}
+
+          {/* Show loaded models count */}
+          <div style={{textAlign:"center",marginTop:10,fontSize:10,color:"#636e72"}}>
+            {llmModels.length} LLM model{llmModels.length!==1?"s":""} available
+            {llmModels.length>0&&" • "}
+            {[...new Set(models.map(m=>m.provider).filter(p=>p&&p!=="local"))].join(", ")}
+          </div>
         </div>
       </div>
     </div>;
