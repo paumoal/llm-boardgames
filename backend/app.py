@@ -1,6 +1,6 @@
 """
 LLM BoardGames — Backend API
-Flask + SQLAlchemy + LangChain
+Flask + SQLAlchemy
 """
 import os
 import json
@@ -8,7 +8,17 @@ import time
 import uuid
 import csv
 import io
+import re
+import urllib.request
 from datetime import datetime
+
+# Load .env file for local development (Render injects env vars directly)
+try:
+    from dotenv import load_dotenv
+    load_dotenv(os.path.join(os.path.dirname(__file__), '..', '.env'))
+except ImportError:
+    pass
+
 from flask import Flask, jsonify, request, send_from_directory, Response
 from flask_cors import CORS
 from flask_sqlalchemy import SQLAlchemy
@@ -203,14 +213,144 @@ def export_all():
 
 
 # ---------------------------------------------------------------------------
-# API — LLM move (server-side, avoids exposing API keys in frontend)
+# LLM providers — detect provider from model name or prefix
+# ---------------------------------------------------------------------------
+# OpenRouter models use prefix "openrouter/" e.g. "openrouter/google/gemini-2.0-flash"
+# Azure models use prefix "azure/" e.g. "azure/gpt-4o"
+
+def detect_provider(model_name):
+    """Return ('openai'|'anthropic'|'gemini'|'openrouter'|'azure', api_key, clean_model)."""
+    mn = model_name.strip()
+
+    # OpenRouter: prefix "openrouter/" or OPENROUTER_API_KEY set + model has "/"
+    if mn.startswith('openrouter/'):
+        key = os.environ.get('OPENROUTER_API_KEY', '')
+        if key:
+            return 'openrouter', key, mn[len('openrouter/'):]
+        raise ValueError('OPENROUTER_API_KEY not configured')
+
+    # Azure: prefix "azure/"
+    if mn.startswith('azure/'):
+        key = os.environ.get('AZURE_OPENAI_API_KEY', '')
+        if key:
+            return 'azure', key, mn[len('azure/'):]
+        raise ValueError('AZURE_OPENAI_API_KEY not configured')
+
+    # OpenAI
+    if any(mn.startswith(m) for m in ['gpt-', 'o1', 'o3']) or 'gpt' in mn:
+        key = os.environ.get('OPENAI_API_KEY', '')
+        if key:
+            return 'openai', key, mn
+        raise ValueError('OPENAI_API_KEY not configured')
+
+    # Gemini
+    if 'gemini' in mn:
+        key = os.environ.get('GOOGLE_API_KEY', os.environ.get('GEMINI_API_KEY', ''))
+        if key:
+            return 'gemini', key, mn
+        raise ValueError('GOOGLE_API_KEY not configured')
+
+    # Anthropic (default)
+    key = os.environ.get('ANTHROPIC_API_KEY', '')
+    if key:
+        return 'anthropic', key, mn
+    raise ValueError('ANTHROPIC_API_KEY not configured')
+
+
+def _http_post(url, body_dict, headers, timeout=90):
+    """Helper: HTTP POST returning parsed JSON."""
+    data = json.dumps(body_dict).encode()
+    req = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.loads(r.read())
+
+
+def call_openai(model, prompt, api_key):
+    """Call OpenAI chat completions."""
+    data = _http_post(
+        'https://api.openai.com/v1/chat/completions',
+        {'model': model, 'max_tokens': 512, 'temperature': 0.3,
+         'messages': [{'role': 'user', 'content': prompt}]},
+        {'Content-Type': 'application/json',
+         'Authorization': f'Bearer {api_key}'}
+    )
+    text = data['choices'][0]['message']['content']
+    u = data.get('usage', {})
+    return text, u.get('prompt_tokens', 0), u.get('completion_tokens', 0)
+
+
+def call_anthropic(model, prompt, api_key):
+    """Call Anthropic messages API."""
+    data = _http_post(
+        'https://api.anthropic.com/v1/messages',
+        {'model': model, 'max_tokens': 512,
+         'messages': [{'role': 'user', 'content': prompt}]},
+        {'Content-Type': 'application/json',
+         'x-api-key': api_key, 'anthropic-version': '2023-06-01'}
+    )
+    text = ''.join(b.get('text', '') for b in data.get('content', []))
+    u = data.get('usage', {})
+    return text, u.get('input_tokens', 0), u.get('output_tokens', 0)
+
+
+def call_gemini(model, prompt, api_key):
+    """Call Google Gemini generateContent API."""
+    url = (f'https://generativelanguage.googleapis.com/v1beta/models/'
+           f'{model}:generateContent?key={api_key}')
+    data = _http_post(
+        url,
+        {'contents': [{'parts': [{'text': prompt}]}],
+         'generationConfig': {'maxOutputTokens': 512, 'temperature': 0.3}},
+        {'Content-Type': 'application/json'}
+    )
+    text = data['candidates'][0]['content']['parts'][0]['text']
+    u = data.get('usageMetadata', {})
+    return text, u.get('promptTokenCount', 0), u.get('candidatesTokenCount', 0)
+
+
+def call_openrouter(model, prompt, api_key):
+    """Call OpenRouter — same format as OpenAI but different URL + header."""
+    data = _http_post(
+        'https://openrouter.ai/api/v1/chat/completions',
+        {'model': model, 'max_tokens': 512, 'temperature': 0.3,
+         'messages': [{'role': 'user', 'content': prompt}]},
+        {'Content-Type': 'application/json',
+         'Authorization': f'Bearer {api_key}',
+         'HTTP-Referer': 'https://llm-boardgames.onrender.com',
+         'X-Title': 'LLM BoardGames'}
+    )
+    text = data['choices'][0]['message']['content']
+    u = data.get('usage', {})
+    return text, u.get('prompt_tokens', 0), u.get('completion_tokens', 0)
+
+
+def call_azure(model, prompt, api_key):
+    """Call Azure OpenAI — requires AZURE_OPENAI_ENDPOINT env var."""
+    endpoint = os.environ.get('AZURE_OPENAI_ENDPOINT', '').rstrip('/')
+    api_version = os.environ.get('AZURE_OPENAI_API_VERSION', '2024-10-21')
+    if not endpoint:
+        raise ValueError('AZURE_OPENAI_ENDPOINT not configured')
+    url = f'{endpoint}/openai/deployments/{model}/chat/completions?api-version={api_version}'
+    data = _http_post(
+        url,
+        {'max_tokens': 512, 'temperature': 0.3,
+         'messages': [{'role': 'user', 'content': prompt}]},
+        {'Content-Type': 'application/json', 'api-key': api_key}
+    )
+    text = data['choices'][0]['message']['content']
+    u = data.get('usage', {})
+    return text, u.get('prompt_tokens', 0), u.get('completion_tokens', 0)
+
+
+# ---------------------------------------------------------------------------
+# API — LLM move (multi-provider: OpenAI, Anthropic, Gemini)
 # ---------------------------------------------------------------------------
 @app.route('/api/llm/move', methods=['POST'])
 def llm_move():
     """
     Request body:
     {
-      "model": "claude-sonnet-4-20250514",
+      "model": "gpt-4o-mini",       ← or any Claude/Gemini model
       "game_name": "Tic-Tac-Toe",
       "game_desc": "...",
       "board": [...],
@@ -220,7 +360,7 @@ def llm_move():
     }
     """
     d = request.json
-    model = d.get('model', 'claude-sonnet-4-20250514')
+    model = d.get('model', 'gpt-4o-mini')
     legal = d['legal_moves']
     formatted = d.get('legal_moves_formatted', [])
 
@@ -235,56 +375,37 @@ def llm_move():
         f'Respond ONLY with JSON: {{"move_index": <number>, "reason": "<brief>"}}'
     )
 
-    input_tokens = len(prompt.split()) * 1.3
+    # Detect provider and call
+    try:
+        provider, api_key, clean_model = detect_provider(model)
+    except ValueError as e:
+        return jsonify({
+            'move_index': 0,
+            'reason': str(e),
+            'time': 0,
+            'tokens': {'input': 0, 'output': 0}
+        })
 
     try:
-        # Try LangChain first
-        from langchain_anthropic import ChatAnthropic
-        from langchain_core.messages import HumanMessage
-
-        api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-        if not api_key:
-            raise ValueError("No ANTHROPIC_API_KEY")
-
-        llm = ChatAnthropic(model=model, api_key=api_key,
-                            max_tokens=512, temperature=0.3)
         t0 = time.time()
-        resp = llm.invoke([HumanMessage(content=prompt)])
+        if provider == 'openai':
+            text, in_tok, out_tok = call_openai(clean_model, prompt, api_key)
+        elif provider == 'gemini':
+            text, in_tok, out_tok = call_gemini(clean_model, prompt, api_key)
+        elif provider == 'openrouter':
+            text, in_tok, out_tok = call_openrouter(clean_model, prompt, api_key)
+        elif provider == 'azure':
+            text, in_tok, out_tok = call_azure(clean_model, prompt, api_key)
+        else:
+            text, in_tok, out_tok = call_anthropic(clean_model, prompt, api_key)
         elapsed = time.time() - t0
-        text = resp.content
-        output_tokens = len(text.split()) * 1.3
-
     except Exception as e:
-        # Fallback: direct HTTP
-        import urllib.request
-        api_key = os.environ.get('ANTHROPIC_API_KEY', '')
-        if not api_key:
-            return jsonify({
-                'move_index': 0,
-                'reason': 'No API key configured',
-                'time': 0,
-                'tokens': {'input': 0, 'output': 0}
-            })
-
-        t0 = time.time()
-        body = json.dumps({
-            'model': model, 'max_tokens': 512,
-            'messages': [{'role': 'user', 'content': prompt}]
-        }).encode()
-        req = urllib.request.Request(
-            'https://api.anthropic.com/v1/messages',
-            data=body,
-            headers={
-                'Content-Type': 'application/json',
-                'x-api-key': api_key,
-                'anthropic-version': '2023-06-01'
-            }
-        )
-        with urllib.request.urlopen(req, timeout=60) as r:
-            data = json.loads(r.read())
-        elapsed = time.time() - t0
-        text = ''.join(b.get('text', '') for b in data.get('content', []))
-        output_tokens = len(text.split()) * 1.3
+        return jsonify({
+            'move_index': 0,
+            'reason': f'API error: {str(e)[:200]}',
+            'time': 0,
+            'tokens': {'input': 0, 'output': 0}
+        })
 
     # Parse response
     idx, reason = 0, text
@@ -294,7 +415,6 @@ def llm_move():
         idx = parsed.get('move_index', 0)
         reason = parsed.get('reason', '')
     except Exception:
-        import re
         m = re.search(r'\d+', text)
         if m:
             idx = int(m.group())
@@ -307,9 +427,83 @@ def llm_move():
         'reason': reason,
         'time': round(elapsed, 4),
         'tokens': {
-            'input': int(input_tokens),
-            'output': int(output_tokens)
+            'input': int(in_tok),
+            'output': int(out_tok)
         }
+    })
+
+
+# ---------------------------------------------------------------------------
+# API — Available models (based on configured API keys)
+# ---------------------------------------------------------------------------
+@app.route('/api/models')
+def list_models():
+    """Return available LLM models based on which API keys are set."""
+    models = [{'id': 'random', 'name': 'Random AI (Demo)', 'provider': 'local'}]
+
+    if os.environ.get('OPENAI_API_KEY'):
+        models.extend([
+            {'id': 'gpt-4o', 'name': 'GPT-4o', 'provider': 'openai'},
+            {'id': 'gpt-4o-mini', 'name': 'GPT-4o Mini', 'provider': 'openai'},
+            {'id': 'gpt-4-turbo', 'name': 'GPT-4 Turbo', 'provider': 'openai'},
+            {'id': 'gpt-3.5-turbo', 'name': 'GPT-3.5 Turbo', 'provider': 'openai'},
+            {'id': 'o3-mini', 'name': 'o3-mini', 'provider': 'openai'},
+        ])
+    if os.environ.get('ANTHROPIC_API_KEY'):
+        models.extend([
+            {'id': 'claude-sonnet-4-20250514', 'name': 'Claude Sonnet 4', 'provider': 'anthropic'},
+            {'id': 'claude-3-5-sonnet-20241022', 'name': 'Claude 3.5 Sonnet', 'provider': 'anthropic'},
+            {'id': 'claude-3-haiku-20240307', 'name': 'Claude 3 Haiku', 'provider': 'anthropic'},
+        ])
+    if os.environ.get('GOOGLE_API_KEY') or os.environ.get('GEMINI_API_KEY'):
+        models.extend([
+            {'id': 'gemini-2.0-flash', 'name': 'Gemini 2.0 Flash', 'provider': 'gemini'},
+            {'id': 'gemini-2.0-flash-lite', 'name': 'Gemini 2.0 Flash Lite', 'provider': 'gemini'},
+            {'id': 'gemini-1.5-pro', 'name': 'Gemini 1.5 Pro', 'provider': 'gemini'},
+        ])
+    if os.environ.get('OPENROUTER_API_KEY'):
+        models.extend([
+            {'id': 'openrouter/openai/gpt-4o', 'name': 'GPT-4o (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/openai/gpt-4o-mini', 'name': 'GPT-4o Mini (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/anthropic/claude-3.5-sonnet', 'name': 'Claude 3.5 Sonnet (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/google/gemini-2.0-flash-exp', 'name': 'Gemini 2.0 Flash (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/meta-llama/llama-3.1-70b-instruct', 'name': 'Llama 3.1 70B (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/deepseek/deepseek-chat-v3-0324', 'name': 'DeepSeek V3 (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/mistralai/mistral-large', 'name': 'Mistral Large (OpenRouter)', 'provider': 'openrouter'},
+        ])
+    if os.environ.get('AZURE_OPENAI_API_KEY') and os.environ.get('AZURE_OPENAI_ENDPOINT'):
+        # Azure models are deployment names — user configures these
+        azure_models = os.environ.get('AZURE_OPENAI_MODELS', 'gpt-4o,gpt-4o-mini')
+        for m in azure_models.split(','):
+            m = m.strip()
+            if m:
+                models.append({'id': f'azure/{m}', 'name': f'{m} (Azure)', 'provider': 'azure'})
+
+    return jsonify(models)
+
+
+# ---------------------------------------------------------------------------
+# API — Debug: check which API keys are configured
+# ---------------------------------------------------------------------------
+@app.route('/api/debug/keys')
+def debug_keys():
+    """Shows which API keys are configured (first/last 4 chars only)."""
+    def mask(key_name):
+        val = os.environ.get(key_name, '')
+        if not val:
+            return None
+        if len(val) <= 8:
+            return f'{val[:2]}...{val[-2:]}'
+        return f'{val[:4]}...{val[-4:]}'
+
+    return jsonify({
+        'OPENAI_API_KEY': mask('OPENAI_API_KEY'),
+        'ANTHROPIC_API_KEY': mask('ANTHROPIC_API_KEY'),
+        'GOOGLE_API_KEY': mask('GOOGLE_API_KEY'),
+        'OPENROUTER_API_KEY': mask('OPENROUTER_API_KEY'),
+        'AZURE_OPENAI_API_KEY': mask('AZURE_OPENAI_API_KEY'),
+        'AZURE_OPENAI_ENDPOINT': os.environ.get('AZURE_OPENAI_ENDPOINT', None),
+        'DATABASE_URL': 'configured' if os.environ.get('DATABASE_URL') else 'sqlite (default)',
     })
 
 
