@@ -4,11 +4,20 @@ services:
     runtime: docker
     plan: free
     envVars:
+      # At least one API key is required for LLM play
       - key: OPENAI_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY
         sync: false
       - key: GOOGLE_API_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: AZURE_OPENAI_API_KEY
+        sync: false
+      - key: AZURE_OPENAI_ENDPOINT
+        sync: false
+      - key: AZURE_OPENAI_MODELS
         sync: false
       - key: DATABASE_URL
         fromDatabase:
