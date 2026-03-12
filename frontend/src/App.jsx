@@ -1,6 +1,161 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 
 // ============================================================
+// GAME RULES — Rich descriptions for LLM prompts
+// ============================================================
+const GAME_RULES = {
+  tictactoe: `Tic-Tac-Toe on a 3x3 grid.
+Roles: "x" (first player) and "o" (second player). "x" always moves first.
+Players alternate turns placing their mark on empty cells (marked "b" for blank).
+Board state uses GDL facts: ["cell","row","col","mark"] where mark is "x", "o", or "b" (blank).
+["control","x"] means it is x's turn to move next. ["control","o"] means it is o's turn.
+Win condition: first to get 3 marks in a row (horizontal, vertical, or diagonal).
+Draw if all 9 cells filled with no winner.
+Coordinates: row 1-3 (top to bottom), col 1-3 (left to right).
+Move format: mark(row,col) - example: mark(1,1) marks the top-left cell.`,
+
+  suicide: `Suicide Tic-Tac-Toe (Misere variant) on a 3x3 grid.
+Roles: "x" (first) and "o" (second). Same board and GDL format as Tic-Tac-Toe.
+REVERSED WIN CONDITION: getting 3 in a row LOSES the game.
+Goal: force your opponent into making 3 in a row while avoiding it yourself.
+Draw if board fills with no line of 3. Move format: mark(row,col).`,
+
+  connect4: `Connect 4 on 8 columns x 6 rows.
+Roles: "red" (first player) and "blue" (second player). "red" always moves first.
+Pieces fall to the lowest empty row in the chosen column. Empty cells are marked "b".
+Board state GDL: ["cell","col","row","mark"]. Note: first coordinate is COLUMN, second is ROW.
+["control","red"] means red moves next. ["control","blue"] means blue moves next.
+Win: first to connect 4 in a line (horizontal, vertical, or diagonal).
+Draw if board fills completely. Move format: drop(col) where col is 1-8.`,
+
+  notconnect4: `Anti-Connect 4 (Misere) on 8x6 board.
+Roles: "red" (first) and "blue" (second). Same board as Connect 4.
+REVERSED: connecting 4 pieces in a row LOSES the game.
+Goal: avoid making 4 in a row while forcing your opponent into it.
+Move format: drop(col) col=1-8.`,
+
+  alquerque: `Alquerque on a 5x5 grid with diagonal connections.
+Roles: "red" (first player) and "black" (second player). Each starts with 10 pieces.
+Board GDL: ["cell","row","col","mark"] where mark is "red", "black", or "blank" (empty).
+["control","red"] = red's turn. ["score","red","N"] = red has N points. ["step","N"] = current step.
+Pieces move along grid lines to adjacent empty points.
+Capture: jump over an adjacent opponent piece to the empty point beyond. MANDATORY if available.
+Each capture scores 10 points. Win by: 100 points, opponent has no moves, or no opponent pieces left.
+Game ends at step 30 if no winner. Move format: move(fromRow,fromCol,toRow,toCol) or jump(fromRow,fromCol,midRow,midCol,toRow,toCol).`,
+
+  battleofnumbers: `Battle of Numbers on 5x5 grid.
+Roles: "red" (first, starts row y=1, advances toward y=5) and "green" (second, starts row y=5, advances toward y=1).
+Each piece has a number value 1-5. Board GDL: ["cell","x","y","number","owner"].
+["control","red"] = red's turn. ["capture","red","N"] = red captured N pieces.
+Pieces move forward one row to empty cell, or capture diagonally if your number >= opponent's number.
+Win by capturing all opponent pieces or blocking all their moves.
+Move format: move(fromX,fromY,toX,toY).`,
+
+  breakthrough: `Breakthrough on 8x8 board.
+Roles: "white" (first, starts rows y=1-2, moves UP toward y=8) and "black" (second, starts rows y=7-8, moves DOWN toward y=1).
+Board GDL: ["cell","x","y","color"]. x=column(1-8), y=row(1-8).
+["control","white"] = white's turn. ["control","black"] = black's turn.
+Each turn: move one piece straight forward to empty cell, OR diagonal forward to capture enemy piece.
+Win: "white" wins by getting any piece to row y=8. "black" wins by getting any piece to row y=1.
+Also win if opponent has zero pieces remaining.
+Move format: move(fromX,fromY,toX,toY).`,
+
+  buttonsandlights: `Buttons and Lights puzzle (single player).
+Role: "robot". Three lights named p, q, r - all start OFF. Three buttons available each turn:
+- Button "a": toggles light p (ON becomes OFF, OFF becomes ON)
+- Button "b": swaps the states of lights p and q
+- Button "c": swaps the states of lights q and r
+Board GDL: fact ["p"] present means p is ON; absent means OFF. Same for ["q"] and ["r"].
+["step","N"] tracks current step number. ["control","robot"] always present.
+Goal: turn ALL 3 lights ON (p AND q AND r) within 6 steps (before step reaches 7).
+Score: 100 if all on, 50 if 2 on, 25 if 1 on, 0 if none.
+Move format: a, b, or c.`,
+
+  hamilton: `Hamilton path puzzle on a 20-node dodecahedral graph (single player).
+Role: "robot". Nodes labeled a through t. Start at node "a".
+Board GDL: ["location","X"]=current position, ["visited","X"]=node already visited, ["score","N"]=current score, ["step","N"]=step count.
+Graph connections: a-b,e,h | b-a,c,j | c-b,d,l | d-c,e,n | e-a,d,f | f-e,g,o | g-f,h,q | h-a,g,i | i-h,j,r | j-b,i,k | k-j,l,s | l-c,k,m | m-l,n,t | n-d,m,o | o-n,f,p | p-o,q,t | q-g,p,r | r-i,q,s | s-k,r,t | t-m,s,p.
+Goal: visit as many UNIQUE nodes as possible in 20 steps. Score increases for each new node visited. Revisiting is allowed but gives no points.
+Move format: move(node) - example: move(b).`,
+
+  hex: `Hex on 7x7 rhombus board.
+Roles: "red" (first player) and "black" (second player).
+Board GDL: ["cell","row","col","color"]. Rows: a through g. Cols: 1 through 7.
+["control","red"] = red's turn. ["control","black"] = black's turn.
+"red" goal: connect top edge (row a) to bottom edge (row g) with unbroken chain of red stones.
+"black" goal: connect left edge (col 1) to right edge (col 7) with unbroken chain of black stones.
+Hex adjacency: each hexagonal cell has up to 6 neighbors. Stones cannot be moved or removed once placed.
+The game CANNOT end in a draw - one player must always win.
+Move format: place(row,col) - example: place(a,1).`,
+
+  hunter: `Hunter puzzle on 5x3 grid (single player).
+Role: "robot". A knight piece hunts pawn pieces.
+Board GDL: ["cell","row","col","piece"] where piece is "knight", "pawn", or "blank".
+["captures","N"] = total pawns captured. ["step","N"] = current step number.
+The knight moves in an L-shape (like chess): 2 squares in one direction + 1 square perpendicular.
+Capture a pawn by landing on its cell. The knight replaces the pawn.
+Goal: maximize captures within 15 steps (before step reaches 16).
+Move format: move(fromRow,fromCol,toRow,toCol).`,
+
+  lines: `Lines on a diamond-shaped board with approximately 55 valid cells.
+Roles: "red" (first player) and "blue" (second player).
+Board GDL: ["cell","row","col","color"]. Rows: a through i. Cols: 1 through 9. Not all row-col combinations are valid.
+["control","red"] = red's turn. ["control","blue"] = blue's turn.
+Players alternate placing stones. Score by gaining majority in rows, columns, and diagonals.
+Game ends when all valid cells are filled.
+Move format: place(row,col) - example: place(a,5).`,
+};
+// Board visualizer for LLM prompt
+function visualizeBoard(gameKey, state) {
+  if (gameKey === "tictactoe" || gameKey === "suicide") {
+    const g = {}; state.forEach(f => { if (f[0]==="cell") g[`${f[1]},${f[2]}`] = f[3]; });
+    let s = "  1 2 3\n";
+    for (let r = 1; r <= 3; r++) { s += r+" "; for (let c = 1; c <= 3; c++) { const v=g[`${r},${c}`]||"."; s += (v==="b"?"." :v)+" "; } s += "\n"; }
+    return s;
+  }
+  if (gameKey === "connect4" || gameKey === "notconnect4") {
+    const g = {}; state.forEach(f => { if (f[0]==="cell") g[`${f[1]},${f[2]}`] = f[3]; });
+    let s = "  1 2 3 4 5 6 7 8\n";
+    for (let r = 6; r >= 1; r--) { s += r+" "; for (let c = 1; c <= 8; c++) { const v=g[`${c},${r}`]||"."; s += (v==="b"?"." :v[0])+" "; } s += "\n"; }
+    return s;
+  }
+  if (gameKey === "breakthrough") {
+    const at = (x,y) => { const f=state.find(f=>f[0]==="cell"&&f[1]===String(x)&&f[2]===String(y)); return f?f[3]:null; };
+    let s = "  1 2 3 4 5 6 7 8\n";
+    for (let y = 8; y >= 1; y--) { s += y+" "; for (let x = 1; x <= 8; x++) { const v=at(x,y); s += (v==="white"?"W":v==="black"?"B":".")+" "; } s += "\n"; }
+    return s;
+  }
+  if (gameKey === "hex") {
+    const rows=["a","b","c","d","e","f","g"];
+    let s = "";
+    for (const r of rows) { s += " ".repeat(rows.indexOf(r)) + r + " "; for (let c = 1; c <= 7; c++) { const f=state.find(f=>f[0]==="cell"&&f[1]===r&&f[2]===String(c)); s += (f?f[3][0]:".")+" "; } s += "\n"; }
+    return s;
+  }
+  if (gameKey === "alquerque") {
+    const at = (r,c) => { const f=state.find(f=>f[0]==="cell"&&f[1]===String(r)&&f[2]===String(c)); return f?f[3]:null; };
+    let s = "  1 2 3 4 5\n";
+    for (let r = 1; r <= 5; r++) { s += r+" "; for (let c = 1; c <= 5; c++) { const v=at(r,c); s += (v==="red"?"R":v==="black"?"B":v==="blank"?".":"?")+" "; } s += "\n"; }
+    return s;
+  }
+  if (gameKey === "buttonsandlights") {
+    const h = x => state.some(f=>f.length===1&&f[0]===x);
+    return `Lights: p=${h("p")?"ON":"OFF"} q=${h("q")?"ON":"OFF"} r=${h("r")?"ON":"OFF"}`;
+  }
+  if (gameKey === "hamilton") {
+    const loc = state.find(f=>f[0]==="location"); const vis = state.filter(f=>f[0]==="visited").map(f=>f[1]);
+    return `Current: ${loc?loc[1]:"?"} | Visited: ${vis.join(",")} (${vis.length}/20)`;
+  }
+  if (gameKey === "hunter") {
+    const at = (r,c) => { const f=state.find(f=>f[0]==="cell"&&f[1]===String(r)&&f[2]===String(c)); return f?f[3]:null; };
+    let s = "  1 2 3\n";
+    for (let r = 1; r <= 5; r++) { s += r+" "; for (let c = 1; c <= 3; c++) { const v=at(r,c); s += (v==="knight"?"K":v==="pawn"?"P":".")+" "; } s += "\n"; }
+    return s;
+  }
+  // Default: GDL facts
+  return JSON.stringify(state);
+}
+
+// ============================================================
 // GAME DEFINITIONS - Based on actual GDL rulesheet formats
 // ============================================================
 
@@ -8,6 +163,10 @@ const GAME_DEFS = {
   tictactoe: {
     name: "Tic-Tac-Toe",
     desc: "Classic 3x3. Get three in a row. Moves: mark(row,col) rows/cols 1-3.",
+    rules: `Tic-Tac-Toe is played on a 3x3 grid. Players "x" and "o" take turns marking empty cells.
+The first player to get 3 marks in a row (horizontal, vertical, or diagonal) wins.
+If all 9 cells are filled with no winner, the game is a draw.
+Coordinates: row 1-3 (top to bottom), col 1-3 (left to right). Move format: mark(row,col).`,
     roles: ["x", "o"], playerCount: 2, category: "classic",
     initState: () => {
       const s = [];
@@ -40,6 +199,10 @@ const GAME_DEFS = {
   },
   suicide: {
     name: "Suicide Tic-Tac-Toe", desc: "Anti TTT. Three in a row loses!",
+    rules: `Suicide Tic-Tac-Toe (Misère variant). Same 3x3 grid as regular Tic-Tac-Toe.
+Players "x" and "o" take turns marking cells. BUT: getting 3 in a row LOSES the game.
+The goal is to AVOID making three in a row while forcing your opponent into it.
+If the board fills with no line of 3, it's a draw. Move format: mark(row,col).`,
     roles: ["x", "o"], playerCount: 2, category: "classic",
     initState: () => GAME_DEFS.tictactoe.initState(),
     getControl: s => GAME_DEFS.tictactoe.getControl(s),
@@ -557,15 +720,22 @@ async function llmMove(game,gk,state,model){
   const ctrl=game.getControl(state),legal=game.getLegalMoves(state);
   if(!legal.length)return null;
   const formatted=legal.map((m,i)=>`${i}: ${game.formatMove(m)}`);
+  const rules=GAME_RULES[gk]||game.desc;
+  const boardVis=visualizeBoard(gk,state);
   try{
     const resp=await fetch("/api/llm/move",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({model,game_name:game.name,game_desc:game.desc,board:state,role:ctrl,
+      body:JSON.stringify({model,game_name:game.name,game_desc:game.desc,game_rules:rules,
+        board:state,board_visual:boardVis,role:ctrl,
         legal_moves:legal,legal_moves_formatted:formatted})});
+    if(!resp.ok) throw new Error(`HTTP ${resp.status}: ${await resp.text()}`);
     const data=await resp.json();
     const idx=data.move_index??0;
     return{move:legal[idx>=0&&idx<legal.length?idx:0],reason:data.reason||"",
       time:data.time||0,tokens:data.tokens||{input:0,output:0}};
-  }catch(e){return{move:legal[Math.floor(Math.random()*legal.length)],reason:"API error: "+e.message,time:0,tokens:{input:0,output:0}};}
+  }catch(e){
+    console.error("LLM error:",e);
+    return{move:legal[Math.floor(Math.random()*legal.length)],reason:"API error: "+e.message,time:0,tokens:{input:0,output:0}};
+  }
 }
 
 function randomAI(game,state){
@@ -621,72 +791,124 @@ export default function App(){
   useEffect(()=>{if(logRef.current)logRef.current.scrollTop=logRef.current.scrollHeight;},[log]);
   const game=selGame?GAME_DEFS[selGame]:null;
 
+  // Refs to avoid stale closures in game loop
+  const gStateRef=useRef(null);
+  const resultRef=useRef(null);
+  const playersRef=useRef({});
+  const matchIdRef=useRef("");
+  const selGameRef=useRef(null);
+
+  // Keep refs in sync
+  useEffect(()=>{gStateRef.current=gState;},[gState]);
+  useEffect(()=>{resultRef.current=result;},[result]);
+  useEffect(()=>{playersRef.current=players;},[players]);
+  useEffect(()=>{matchIdRef.current=matchId;},[matchId]);
+  useEffect(()=>{selGameRef.current=selGame;},[selGame]);
+
   const startGame=async()=>{
-    const s=game.initState();setGState(s);setLog([`🎮 ${game.name} started`]);
-    setMoveLog([]);setResult(null);setTotTok({i:0,o:0});busy.current=false;
-    // Create match in DB
+    const s=game.initState();
+    setGState(s);gStateRef.current=s;
+    setLog([`🎮 ${game.name} started`]);
+    setMoveLog([]);setResult(null);resultRef.current=null;
+    setTotTok({i:0,o:0});busy.current=false;
     const mid=`${Date.now().toString(36)}-${Math.random().toString(36).slice(2,8)}`;
-    setMatchId(mid);
+    setMatchId(mid);matchIdRef.current=mid;
     try{
       const r=await fetch("/api/match",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({game:selGame,player1_model:players[game.roles[0]]||"human",
           player2_model:players[game.roles[1]]||players[game.roles[0]]||"human"})});
-      const d=await r.json();if(d.match_id)setMatchId(d.match_id);
-    }catch(e){console.log("DB offline, using local ID");}
+      const d=await r.json();if(d.match_id){setMatchId(d.match_id);matchIdRef.current=d.match_id;}
+    }catch(e){console.log("DB offline");}
     setScreen("play");
   };
 
   const addRec=(role,move,valid,win,model,time,board,legals,reason,tok)=>{
-    const rec={id:Date.now().toString(),id_match:matchId,player:role,move:JSON.stringify(move),
+    const mid=matchIdRef.current;const gk=selGameRef.current;
+    const rec={id:Date.now().toString(),id_match:mid,player:role,move:JSON.stringify(move),
       valid:valid?1:0,win:win?1:0,model,execution_time:time.toFixed(4),timestamp:new Date().toISOString(),
-      board:JSON.stringify(board),legalMoves:JSON.stringify(legals),game:selGame,reason,
+      board:JSON.stringify(board),legalMoves:JSON.stringify(legals),game:gk,reason,
       tokens_input:tok?.input||0,tokens_output:tok?.output||0};
     setMoveLog(p=>[...p,rec]);
     if(tok)setTotTok(p=>({i:p.i+(tok.input||0),o:p.o+(tok.output||0)}));
-    // Persist to backend DB (fire-and-forget)
     fetch("/api/move",{method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({match_id:matchId,player:role,move,valid:valid?1:0,win:win?1:0,
-        model,execution_time:time,board,legal_moves:legals,game:selGame,reason,
+      body:JSON.stringify({match_id:mid,player:role,move,valid:valid?1:0,win:win?1:0,
+        model,execution_time:time,board,legal_moves:legals,game:gk,reason,
         tokens_input:tok?.input||0,tokens_output:tok?.output||0})}).catch(()=>{});
   };
 
-  const processMove=useCallback(async(move,ai=null)=>{
-    if(!gState||result)return;
-    const role=game.getControl(gState),legals=game.getLegalMoves(gState);
+  // Core game loop — uses refs to always have fresh state
+  const executeMove=async(currentState,move,aiResult=null)=>{
+    if(!currentState||resultRef.current)return currentState;
+    const g=GAME_DEFS[selGameRef.current];if(!g)return currentState;
+    const role=g.getControl(currentState);
+    const legals=g.getLegalMoves(currentState);
     const isLegal=legals.some(m=>JSON.stringify(m)===JSON.stringify(move));
-    const pType=players[role]||"human",mName=pType==="human"?"human":pType;
+    const pType=playersRef.current[role]||"human";
+    const mName=pType==="human"?"human":pType;
+
     if(!isLegal){
-      setLog(l=>[...l,`❌ Invalid: ${game.formatMove(move)}`]);
-      addRec(role,move,false,false,mName,ai?.time||0,gState,legals,ai?.reason||"Invalid",ai?.tokens);
-      if(pType!=="human"&&legals.length>0){await processMove(legals[0],{...ai,reason:"Fallback"});}
-      return;
+      setLog(l=>[...l,`❌ Invalid: ${g.formatMove(move)}`]);
+      addRec(role,move,false,false,mName,aiResult?.time||0,currentState,legals,aiResult?.reason||"Invalid",aiResult?.tokens);
+      if(pType!=="human"&&legals.length>0) return executeMove(currentState,legals[0],{...aiResult,reason:"Fallback"});
+      return currentState;
     }
-    const ns=game.applyMove(gState,move);
-    setLog(l=>[...l,`${role}: ${game.formatMove(move)}${ai?.reason?` — "${ai.reason}"`:"" }`]);
-    const term=game.checkTerminal(ns);
-    addRec(role,move,true,term.over&&term.winner===role,mName,ai?.time||0,ns,legals,ai?.reason||"",ai?.tokens);
-    setGState(ns);
-    if(term.over){setResult(term);setLog(l=>[...l,term.winner?`🏆 ${term.winner} wins!`:"🤝 Game over"]);busy.current=false;
-      fetch("/api/match/"+matchId+"/end",{method:"POST",headers:{"Content-Type":"application/json"},
+
+    const ns=g.applyMove(currentState,move);
+    setLog(l=>[...l,`${role}: ${g.formatMove(move)}${aiResult?.reason?` — "${aiResult.reason}"`:"" }`]);
+    const term=g.checkTerminal(ns);
+    addRec(role,move,true,term.over&&term.winner===role,mName,aiResult?.time||0,ns,legals,aiResult?.reason||"",aiResult?.tokens);
+
+    setGState(ns);gStateRef.current=ns;
+
+    if(term.over){
+      setResult(term);resultRef.current=term;
+      setLog(l=>[...l,term.winner?`🏆 ${term.winner} wins!`:"🤝 Game over"]);
+      busy.current=false;
+      fetch("/api/match/"+matchIdRef.current+"/end",{method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({winner:term.winner||null})}).catch(()=>{});
-      return;}
-    const nxRole=game.getControl(ns),nxP=players[nxRole];
-    if(nxP&&nxP!=="human"){await doAI(ns,nxRole,nxP);}else{busy.current=false;}
-  },[gState,result,game,players,matchId,selGame]);
+      return ns;
+    }
 
-  const doAI=useCallback(async(state,role,modelId)=>{
-    if(busy.current)return;busy.current=true;setThinking(true);
-    await new Promise(r=>setTimeout(r,250));
-    const ai=modelId==="random"?randomAI(game,state):await llmMove(game,selGame,state,modelId);
-    setThinking(false);busy.current=false;
-    if(ai&&ai.move)await processMove(ai.move,ai);
-  },[game,selGame]);
+    // Check if next player is AI
+    const nxRole=g.getControl(ns);
+    const nxP=playersRef.current[nxRole];
+    if(nxP&&nxP!=="human"){
+      return doAITurn(ns,nxRole,nxP);
+    }
+    busy.current=false;
+    return ns;
+  };
 
+  const doAITurn=async(state,role,modelId)=>{
+    if(resultRef.current)return state;
+    setThinking(true);
+    await new Promise(r=>setTimeout(r,300));
+    const g=GAME_DEFS[selGameRef.current];
+    const ai=modelId==="random"?randomAI(g,state):await llmMove(g,selGameRef.current,state,modelId);
+    setThinking(false);
+    if(ai&&ai.move) return executeMove(state,ai.move,ai);
+    busy.current=false;
+    return state;
+  };
+
+  // Public handler for human moves
+  const handleHumanMove=(move)=>{
+    if(busy.current||resultRef.current)return;
+    busy.current=true;
+    executeMove(gStateRef.current,move);
+  };
+
+  // Trigger first AI move when game starts
   useEffect(()=>{
-    if(screen!=="play"||!gState||result||thinking||busy.current)return;
-    const role=game?.getControl(gState),p=players[role];
-    if(p&&p!=="human")doAI(gState,role,p);
-  },[screen,gState,result,thinking]);
+    if(screen!=="play"||!gState||result||busy.current)return;
+    const g=game;if(!g)return;
+    const role=g.getControl(gState);
+    const p=players[role];
+    if(p&&p!=="human"){
+      busy.current=true;
+      doAITurn(gState,role,p);
+    }
+  },[screen]); // Only trigger on screen change to "play"
 
   const dlCSV=()=>{
     // Try backend download first, fallback to local data
@@ -798,7 +1020,7 @@ export default function App(){
         {thinking&&<span style={{color:"#7c6fae",fontSize:10}}>⏳ AI…</span>}
       </div>
       <div style={{background:"rgba(30,30,60,.4)",borderRadius:10,padding:18,display:"flex",justifyContent:"center",marginBottom:10,border:"1px solid #2a2a4a",minHeight:180}}>
-        {gState&&<GameBoard gameKey={selGame} state={gState} onMove={m=>processMove(m)} active={isHuman&&!thinking&&!result} game={game}/>}
+        {gState&&<GameBoard gameKey={selGame} state={gState} onMove={m=>handleHumanMove(m)} active={isHuman&&!thinking&&!result} game={game}/>}
       </div>
       <div ref={logRef} style={{background:"rgba(20,20,40,.6)",borderRadius:6,padding:8,maxHeight:140,overflowY:"auto",border:"1px solid #2a2a4a"}}>
         <div style={{fontSize:9,letterSpacing:2,textTransform:"uppercase",color:"#5a5a7a",marginBottom:4}}>Log</div>
