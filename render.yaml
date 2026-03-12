@@ -28,3 +28,4 @@ databases:
   - name: boardgames-db
     plan: free
     databaseName: boardgames
+
