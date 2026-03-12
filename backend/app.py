@@ -367,13 +367,43 @@ def llm_move():
     moves_str = "\n".join(formatted) if formatted else \
         "\n".join(f"{i}: {m}" for i, m in enumerate(legal))
 
-    prompt = (
-        f'You are playing "{d["game_name"]}". {d["game_desc"]}\n\n'
-        f'Current state (GDL): {json.dumps(d["board"])}\n\n'
-        f'You are: {d["role"]}\n\n'
-        f'Legal moves:\n{moves_str}\n\n'
-        f'Respond ONLY with JSON: {{"move_index": <number>, "reason": "<brief>"}}'
-    )
+    # Build rich prompt with GDL state, rules, and visual board
+    game_rules = d.get('game_rules', d.get('game_desc', ''))
+    board_visual = d.get('board_visual', '')
+    board_gdl = d.get('board', [])
+    role = d.get('role', '')
+
+    # Format GDL state exactly as in the CSV: [['cell','1','1','b'],['control','x']]
+    board_gdl_str = repr(board_gdl)
+
+    prompt = f"""You are an expert game-playing AI competing in "{d['game_name']}".
+
+GAME RULES:
+{game_rules}
+
+TURN SYSTEM:
+- You are playing as "{role}".
+- The fact ["control", "{role}"] in the board state means it is currently YOUR turn to move.
+- After you move, control passes to your opponent.
+- You are competing against an opponent. Play strategically to win.
+
+CURRENT BOARD STATE (GDL facts):
+{board_gdl_str}
+
+BOARD VISUALIZATION:
+{board_visual}
+
+YOUR LEGAL MOVES (choose one by its index number):
+{moves_str}
+
+INSTRUCTIONS:
+- Analyze the board state carefully.
+- Consider your opponent's possible responses.
+- Choose the move that maximizes your chance of winning.
+- Respond with ONLY a valid JSON object in this exact format:
+{{"move_index": <integer>, "reason": "<brief strategic explanation>"}}
+- The "move_index" must be one of the index numbers shown above.
+- Do NOT include any other text before or after the JSON."""
 
     # Detect provider and call
     try:
@@ -463,13 +493,30 @@ def list_models():
         ])
     if os.environ.get('OPENROUTER_API_KEY'):
         models.extend([
+            # OpenAI via OpenRouter
             {'id': 'openrouter/openai/gpt-4o', 'name': 'GPT-4o (OpenRouter)', 'provider': 'openrouter'},
             {'id': 'openrouter/openai/gpt-4o-mini', 'name': 'GPT-4o Mini (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/openai/o3-mini', 'name': 'o3-mini (OpenRouter)', 'provider': 'openrouter'},
+            # Anthropic via OpenRouter
+            {'id': 'openrouter/anthropic/claude-sonnet-4', 'name': 'Claude Sonnet 4 (OpenRouter)', 'provider': 'openrouter'},
             {'id': 'openrouter/anthropic/claude-3.5-sonnet', 'name': 'Claude 3.5 Sonnet (OpenRouter)', 'provider': 'openrouter'},
-            {'id': 'openrouter/google/gemini-2.0-flash-exp', 'name': 'Gemini 2.0 Flash (OpenRouter)', 'provider': 'openrouter'},
-            {'id': 'openrouter/meta-llama/llama-3.1-70b-instruct', 'name': 'Llama 3.1 70B (OpenRouter)', 'provider': 'openrouter'},
-            {'id': 'openrouter/deepseek/deepseek-chat-v3-0324', 'name': 'DeepSeek V3 (OpenRouter)', 'provider': 'openrouter'},
-            {'id': 'openrouter/mistralai/mistral-large', 'name': 'Mistral Large (OpenRouter)', 'provider': 'openrouter'},
+            # Google via OpenRouter
+            {'id': 'openrouter/google/gemini-2.5-flash', 'name': 'Gemini 2.5 Flash (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/google/gemini-2.0-flash-exp:free', 'name': 'Gemini 2.0 Flash [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            # Meta Llama
+            {'id': 'openrouter/meta-llama/llama-4-maverick:free', 'name': 'Llama 4 Maverick [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/meta-llama/llama-3.3-70b-instruct:free', 'name': 'Llama 3.3 70B [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/meta-llama/llama-3.1-8b-instruct:free', 'name': 'Llama 3.1 8B [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            # DeepSeek
+            {'id': 'openrouter/deepseek/deepseek-chat-v3-0324:free', 'name': 'DeepSeek V3 [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/deepseek/deepseek-r1:free', 'name': 'DeepSeek R1 [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            # Mistral
+            {'id': 'openrouter/mistralai/mistral-small-3.1-24b-instruct:free', 'name': 'Mistral Small 3.1 [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            # Qwen
+            {'id': 'openrouter/qwen/qwen3-235b-a22b:free', 'name': 'Qwen3 235B [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            {'id': 'openrouter/qwen/qwen3-30b-a3b:free', 'name': 'Qwen3 30B [FREE] (OpenRouter)', 'provider': 'openrouter'},
+            # Free router
+            {'id': 'openrouter/openrouter/free', 'name': 'Auto-select FREE model (OpenRouter)', 'provider': 'openrouter'},
         ])
     if os.environ.get('AZURE_OPENAI_API_KEY') and os.environ.get('AZURE_OPENAI_ENDPOINT'):
         # Azure models are deployment names — user configures these
